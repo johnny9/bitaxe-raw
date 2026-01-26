@@ -34,13 +34,13 @@ pub async fn usb_task(
     }
 }
 
-/// Handle ASIC UART <-> BMC USB TTY forwarding and baudrate changes
-/// 
-/// 9-bit serial data is encoded as pairs of bytes over USB:
+/// Handle ASIC UART <-> BMC USB TTY forwarding and baudrate changes.
+///
+/// 9-bit serial data is encoded as pairs of bytes over USB for TX:
 /// - First byte: lower 8 bits of the 9-bit word
 /// - Second byte: bit 8 (0 or 1)
-/// 
-/// Received 9-bit serial data is sent to USB as pairs of bytes in the same format.
+///
+/// Received UART data is truncated to 8 bits and sent as single bytes.
 pub async fn pipe_uart<'d, T: usb::Instance + 'd>(
     usb_tx: &mut Sender<'d, usb::Driver<'d, T>>,
     usb_rx: &mut Receiver<'d, usb::Driver<'d, T>>,
@@ -54,7 +54,7 @@ pub async fn pipe_uart<'d, T: usb::Instance + 'd>(
     loop {
         let usb_read = usb_rx.read_packet(&mut usb_buf);
         let control_change = ctrl.control_changed();
-        let uart_read = uart.read_u16();
+        let uart_read = uart.read_u8();
 
         match select3(usb_read, control_change, uart_read).await {
             // Forward data from USB host to UART as 9-bit words
@@ -62,7 +62,7 @@ pub async fn pipe_uart<'d, T: usb::Instance + 'd>(
             Either3::First(result) => {
                 let n = result?;
                 let data = &usb_buf[..n];
-                
+
                 let mut i = 0;
                 // Process any pending byte from last packet
                 if let Some(low_byte) = pending_byte {
@@ -74,7 +74,7 @@ pub async fn pipe_uart<'d, T: usb::Instance + 'd>(
                         pending_byte = None;
                     }
                 }
-                
+
                 // Process pairs of bytes
                 while i + 1 < n {
                     let low_byte = data[i];
@@ -83,7 +83,7 @@ pub async fn pipe_uart<'d, T: usb::Instance + 'd>(
                     uart.write_u16(word).await;
                     i += 2;
                 }
-                
+
                 // Save any remaining byte for next packet
                 if i < n {
                     pending_byte = Some(data[i]);
@@ -95,21 +95,19 @@ pub async fn pipe_uart<'d, T: usb::Instance + 'd>(
                 let baudrate = line_coding.data_rate();
                 uart.set_baudrate(baudrate);
             }
-            // Forward UART RX data to USB as pairs of bytes
-            Either3::Third(word) => {
+            // Forward UART RX data to USB as single bytes
+            Either3::Third(byte) => {
                 let mut count = 0;
                 
-                // Add the first received word
-                uart_buf[count] = (word & 0xFF) as u8;
-                uart_buf[count + 1] = ((word >> 8) & 0x01) as u8;
-                count += 2;
+                // Add the first received byte
+                uart_buf[count] = byte;
+                count += 1;
                 
                 // Opportunistically drain any additional buffered data
-                while count + 1 < uart_buf.len() {
-                    if let Some(word) = uart.try_read() {
-                        uart_buf[count] = (word & 0xFF) as u8;
-                        uart_buf[count + 1] = ((word >> 8) & 0x01) as u8;
-                        count += 2;
+                while count < uart_buf.len() {
+                    if let Some(byte) = uart.try_read() {
+                        uart_buf[count] = byte;
+                        count += 1;
                     } else {
                         break;
                     }

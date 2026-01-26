@@ -2,7 +2,7 @@ use embassy_rp::pio::{
     Config, Direction, FifoJoin, Instance, PioPin, ShiftDirection, StateMachine,
 };
 
-/// PIO-based 9N1 UART (9 data bits, no parity, 1 stop bit)
+/// PIO-based 9N1 UART TX and 8-bit RX (drops 9th data bit)
 pub struct PioUart<'d, PIO: Instance, const SM_TX: usize, const SM_RX: usize> {
     sm_tx: StateMachine<'d, PIO, SM_TX>,
     sm_rx: StateMachine<'d, PIO, SM_RX>,
@@ -32,16 +32,17 @@ impl<'d, PIO: Instance, const SM_TX: usize, const SM_RX: usize> PioUart<'d, PIO,
             ".wrap"
         );
 
-        // PIO program for 9-bit UART RX
+        // PIO program for 9-bit UART RX, dropping the 9th bit
         // Receives 1 start bit, 9 data bits, 1 stop bit
         // Each bit period is 8 cycles
         let prg_rx = pio_proc::pio_asm!(
             ".wrap_target"
             "wait 0 pin 0",          // Wait for start bit (falling edge)
-            "set x, 8     [11]",     // Set bit counter to 8 (9 bits), delay 1.5 bit periods to center of first data bit
+            "set x, 7     [11]",     // Set bit counter to 7 (8 bits), delay 1.5 bit periods to center of first data bit
             "bitloop:",
             "in pins, 1   [6]",      // Sample and shift in 1 bit (7 cycles)
             "jmp x-- bitloop",       // Loop (1 cycle) = 8 cycles per bit
+            "nop        [7]",        // Wait out the 9th data bit time (drop addr/data flag)
             ".wrap"                  // Remove manual push, use autopush instead
         );
 
@@ -75,7 +76,7 @@ impl<'d, PIO: Instance, const SM_TX: usize, const SM_RX: usize> PioUart<'d, PIO,
         cfg_rx.set_in_pins(&[&rx_pin]);
         cfg_rx.shift_in.direction = ShiftDirection::Right;  // Shift right (LSB first) like standard UART
         cfg_rx.shift_in.auto_fill = true;   // Enable autopush
-        cfg_rx.shift_in.threshold = 9;      // Autopush after 9 bits
+        cfg_rx.shift_in.threshold = 8;      // Autopush after 8 bits (9th bit dropped)
         cfg_rx.fifo_join = FifoJoin::RxOnly;
         cfg_rx.clock_divider = Self::calculate_clk_div(baudrate);
         
@@ -112,16 +113,15 @@ impl<'d, PIO: Instance, const SM_TX: usize, const SM_RX: usize> PioUart<'d, PIO,
 
     /// Write a 9-bit value (blocking)
     pub async fn write_u16(&mut self, data: u16) {
-        // Mask to 9 bits
         let data = data & 0x1FF;
         self.sm_tx.tx().wait_push(data as u32).await;
     }
 
-    /// Read a 9-bit value (blocking)
+    /// Read an 8-bit value (blocking); 9th bit is dropped by the RX program
     #[allow(dead_code)]
-    pub async fn read_u16(&mut self) -> u16 {
+    pub async fn read_u8(&mut self) -> u8 {
         let data = self.sm_rx.rx().wait_pull().await;
-        ((data >> 23) & 0x1FF) as u16
+        ((data >> 24) & 0xFF) as u8
     }
 
     /// Check if TX FIFO is full
@@ -147,12 +147,11 @@ impl<'d, PIO: Instance, const SM_TX: usize, const SM_RX: usize> PioUart<'d, PIO,
         }
     }
 
-    /// Try to read a 9-bit value (non-blocking)
-    pub fn try_read(&mut self) -> Option<u16> {
+    /// Try to read an 8-bit value (non-blocking); 9th bit is dropped
+    pub fn try_read(&mut self) -> Option<u8> {
         if let Some(data) = self.sm_rx.rx().try_pull() {
-            // With autopush threshold=9 and shift_right, autopush happens after 9 bits
-            // The bits end up in the upper 9 bits [31:23] of the 32-bit word
-            Some(((data >> 23) & 0x1FF) as u16)
+            // With autopush threshold=8 and shift_right, bits land in [31:24]
+            Some(((data >> 24) & 0xFF) as u8)
         } else {
             None
         }
@@ -204,13 +203,13 @@ pub struct PioUartRx<'d, PIO: Instance, const SM: usize> {
 
 #[allow(dead_code)]
 impl<'d, PIO: Instance, const SM: usize> PioUartRx<'d, PIO, SM> {
-    pub async fn read_u16(&mut self) -> u16 {
+    pub async fn read_u8(&mut self) -> u8 {
         let data = self.sm.rx().wait_pull().await;
-        ((data >> 23) & 0x1FF) as u16
+        ((data >> 24) & 0xFF) as u8
     }
 
-    pub fn try_read(&mut self) -> Option<u16> {
-        self.sm.rx().try_pull().map(|data| ((data >> 23) & 0x1FF) as u16)
+    pub fn try_read(&mut self) -> Option<u8> {
+        self.sm.rx().try_pull().map(|data| ((data >> 24) & 0xFF) as u8)
     }
 
     pub fn is_empty(&mut self) -> bool {
