@@ -42,8 +42,8 @@ bind_interrupts!(struct Irqs {
 const FLASH_SIZE: usize = 4 * 1024 * 1024;
 const VERSION: u16 = 0x0001;
 
-static MANUFACTURER: &str = "256F";
-static PRODUCT: &str = "EmberOne00";
+static MANUFACTURER: &str = "OSMU";
+static PRODUCT: &str = "BIRDS";
 
 /// Return a unique serial number for this device by hashing its flash JEDEC ID.
 fn serial_number() -> &'static str {
