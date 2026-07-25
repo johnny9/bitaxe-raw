@@ -41,16 +41,26 @@ For UF2-based development:
 cargo build --release
 
 # Convert the ELF to an RP2040-compatible UF2 image:
-elf2uf2-rs target/thumbv6m-none-eabi/release/firmware firmware.uf2
+elf2uf2-rs target/thumbv6m-none-eabi/release/bitaxe-birds-raw bitaxe-birds-raw.uf2
 
 # Convert and deploy the UF2 image to an mounted RP2040:
-elf2uf2-rs -d target/thumbv6m-none-eabi/release/firmware
+elf2uf2-rs -d target/thumbv6m-none-eabi/release/bitaxe-birds-raw
 ```
 
 ## Running
 The usbserial firmware will create two serial ports. The first serial port is "control serial" for I2C, GPIO, and ADC. The second serial port is "data serial" and is pass through UART.
 
-The composite USB device uses VID/PID `c0de:cafe`, manufacturer `OSMU`, and product `BitaxeBonanza`.
+The composite USB device uses VID/PID `c0de:cafe`, manufacturer `OSMU`, product `BitaxeBonanza`, and a 16-character serial derived from the RP2040 Pico's SPI flash unique ID.
+
+| Function | RP2040 GPIO |
+|----------|-------------|
+| ASIC TX / RX | GP8 / GP9 |
+| ASIC trip / reset | GP10 / GP11 |
+| I2C SDA / SCL | GP14 / GP15 |
+| VR PGOOD / enable | GP16 / GP19 |
+| 5 V enable | GP18 |
+| Fan PWM / tach | GP20 / GP21 |
+| Domain ADC 1 / 2 / 3 | GP26 / GP27 / GP28 |
 
 ### Data Serial
 - Second serial port
@@ -144,6 +154,10 @@ Example:
 - Get VR_PGOOD: `06 00 00 00 06 05`
 
 GPIO and fan commands operate directly on the RP2040 pins. There is no safety-lease protocol on this developer firmware; the host owns power and reset sequencing.
+
+This intentionally follows the Bonanza GPIO numbering: command `0x00` is the `RST_N` compatibility alias and VR enable is command `0x04`. Clients written for the older BIRDS raw mapping, where `0x00` meant VR enable, must use `0x04`.
+
+Closing the control serial port immediately asserts ASIC reset, disables 5 V and VR power, and drives the fan to full speed. This requires no lease acquisition, renewal, or keepalive command.
 
 **ADC**
 

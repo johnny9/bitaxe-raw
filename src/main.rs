@@ -40,22 +40,23 @@ bind_interrupts!(struct Irqs {
     PIO1_IRQ_0 => embassy_rp::pio::InterruptHandler<PIO1>;
 });
 
-const FLASH_SIZE: usize = 4 * 1024 * 1024;
+const FLASH_SIZE: usize = 2 * 1024 * 1024;
 const VERSION: u16 = 0x0001;
 
 static MANUFACTURER: &str = "OSMU";
 static PRODUCT: &str = "BitaxeBonanza";
 
-/// Return a unique serial number for this device by hashing its flash JEDEC ID.
+/// Return a unique serial number for this device from its SPI flash unique ID.
 fn serial_number() -> &'static str {
     let p = unsafe { embassy_rp::Peripherals::steal() };
     let flash = unsafe { p.FLASH.clone_unchecked() };
     let mut flash = flash::Flash::<_, flash::Async, FLASH_SIZE>::new(flash, p.DMA_CH0);
-    static SERIAL_NUMBER_BUF: StaticCell<[u8; 8]> = StaticCell::new();
-    let jedec_id = flash.blocking_jedec_id().unwrap();
-    let sn = const_murmur3::murmur3_32(&jedec_id.to_le_bytes(), 0);
-    let buf = SERIAL_NUMBER_BUF.init([0; 8]);
-    hex::encode_to_slice(sn.to_le_bytes(), &mut buf[..]).unwrap();
+    let mut unique_id = [0; 8];
+    flash.blocking_unique_id(&mut unique_id).unwrap();
+
+    static SERIAL_NUMBER_BUF: StaticCell<[u8; 16]> = StaticCell::new();
+    let buf = SERIAL_NUMBER_BUF.init([0; 16]);
+    hex::encode_to_slice(unique_id, &mut buf[..]).unwrap();
     unsafe { core::str::from_utf8_unchecked(buf) }
 }
 
