@@ -70,14 +70,14 @@ The composite USB device uses VID/PID `c0de:cafe`, manufacturer `OSMU`, product 
 
 **9-bit Data Encoding over USB:**
 
-Data is sent/received as pairs of bytes:
+Host-to-ASIC data is sent as pairs of bytes:
 - **First byte**: Lower 8 bits of the 9-bit word (bits 0-7)
 - **Second byte**: Bit 8 (only LSB is used, can be 0 or 1)
 
 Examples:
 - To send `0x155` (binary: `1_01010101`): Send bytes `[0x55, 0x01]`
 - To send `0x0AA` (binary: `0_10101010`): Send bytes `[0xAA, 0x00]`
-- Received 9-bit data is sent to USB in the same format
+- ASIC-to-host responses return only bits 0 through 7 as raw bytes. The RP2040 still samples the complete 9N1 word before dropping bit 8. This matches the latest Bonanza Bridge and the BIRDS `bzmd` receive contract.
 
 **Note:** The 9th bit can be used for addressing or protocol-specific purposes depending on your ASIC requirements.
 

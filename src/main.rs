@@ -26,6 +26,7 @@ mod control;
 mod control_protocol;
 mod pio_uart;
 mod uart;
+mod uart_codec;
 
 pub type I2cPeripheral = embassy_rp::peripherals::I2C1;
 pub type I2cDriver = i2c::I2c<'static, I2cPeripheral, i2c::Async>;
