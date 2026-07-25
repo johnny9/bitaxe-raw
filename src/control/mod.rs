@@ -11,6 +11,9 @@ use heapless::Vec;
 pub mod i2c;
 const I2C_COMMAND: u8 = 5;
 
+pub mod system;
+const SYSTEM_COMMAND: u8 = 0;
+
 pub mod gpio;
 const GPIO_COMMAND: u8 = 6;
 
@@ -29,6 +32,7 @@ struct Command {
 
 #[derive(defmt::Format)]
 enum CommandInner {
+    System(system::Command),
     I2c(i2c::Command),
     Gpio(gpio::Command),
     Adc(adc::Command),
@@ -43,6 +47,11 @@ impl Command {
         };
 
         match *page {
+            SYSTEM_COMMAND => Ok(Self {
+                id: *id,
+                bus: *bus,
+                inner: CommandInner::System(system::Command::from_bytes(data)?),
+            }),
             I2C_COMMAND => Ok(Self {
                 id: *id,
                 bus: *bus,
@@ -134,6 +143,7 @@ impl Controller {
         loop {
             let cmd = COMMAND_CHANNEL.receive().await;
             let res = match cmd.inner {
+                CommandInner::System(cmd) => cmd.handle(self).await,
                 CommandInner::I2c(cmd) => cmd.handle(self).await,
                 CommandInner::Gpio(cmd) => cmd.handle(self).await,
                 CommandInner::Adc(cmd) => cmd.handle(self).await,

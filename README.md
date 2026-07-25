@@ -159,6 +159,18 @@ This intentionally follows the Bonanza GPIO numbering: command `0x00` is the `RS
 
 Closing the control serial port immediately asserts ASIC reset, disables 5 V and VR power, and drives the fan to full speed. This requires no lease acquisition, renewal, or keepalive command.
 
+**System diagnostics**
+
+The read-only ESP-compatible diagnostic commands are available on page `0x00`:
+
+- firmware and protocol info: `0x01`
+- receive overflow counters: `0x02`
+- safety status: `0x10`
+
+The payload schemas and error encodings match `bitaxe-raw-bonanza`. The direct RP2040 firmware reports protocol `1.0`, zero intermediate-UART/software-ring overflow counters, and its real GPIO, trip, and fan state. Its safety stage is `BootSafe` because this trusted-developer firmware deliberately has no lease. Lease mutation commands remain unavailable to host clients, matching the ESP raw interface.
+
+Errors use the ESP diagnostic namespace: timeout `0x10`, invalid command `0x11`, denied `0x12`, fault `0x13`, and extended errors beginning with `0xff`. Buffer overflow is encoded as `ff 42 75 66` (`ff "Buf"`).
+
 **ADC**
 
 Commands:

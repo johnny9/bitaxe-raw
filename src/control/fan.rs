@@ -6,6 +6,7 @@ use super::{CommandError, Controller, ControllerCommand};
 pub struct Pins<'d> {
     pub pwm: pwm::Pwm<'d>,
     pub tach: gpio::Input<'d>,
+    pub percent: u8,
 }
 
 #[derive(defmt::Format)]
@@ -36,6 +37,7 @@ pub fn set_speed(pins: &mut Pins<'_>, speed: u8) {
     config.phase_correct = false;
     config.enable = true;
     pins.pwm.set_config(&config);
+    pins.percent = speed.min(100);
 }
 
 impl ControllerCommand for Command {

@@ -24,6 +24,7 @@ use static_cell::StaticCell;
 
 mod control;
 mod control_protocol;
+mod diagnostics;
 mod pio_uart;
 mod uart;
 mod uart_codec;
@@ -143,7 +144,7 @@ async fn main(spawner: Spawner) {
         let pwm = pwm::Pwm::new_output_a(p.PWM_SLICE2, p.PIN_20, pwm_config.clone());
 
         let tach = gpio::Input::new(p.PIN_21, gpio::Pull::None);
-        control::fan::Pins { pwm, tach }
+        control::fan::Pins { pwm, tach, percent: 100 }
     };
 
     let pio::Pio { mut common, sm0, sm1, .. } = pio::Pio::new(p.PIO1, Irqs);
