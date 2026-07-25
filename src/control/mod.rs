@@ -72,8 +72,12 @@ impl Command {
 pub enum CommandError {
     #[allow(dead_code)]
     Timeout, // 0x10
-    Invalid,               // 0x11
-    BufferOverflow,        // 0x12
+    Invalid, // 0x11
+    #[allow(dead_code)]
+    Denied, // 0x12
+    #[allow(dead_code)]
+    Fault, // 0x13
+    BufferOverflow,
     Message(&'static str), // 0xff
 }
 
@@ -84,16 +88,23 @@ impl CommandError {
 
         match self {
             CommandError::Timeout => {
-                buf.push(0x10).unwrap();
+                buf.push(crate::control_protocol::ERROR_TIMEOUT).unwrap();
             }
             CommandError::Invalid => {
-                buf.push(0x11).unwrap();
+                buf.push(crate::control_protocol::ERROR_INVALID).unwrap();
+            }
+            CommandError::Denied => {
+                buf.push(crate::control_protocol::ERROR_DENIED).unwrap();
+            }
+            CommandError::Fault => {
+                buf.push(crate::control_protocol::ERROR_FAULT).unwrap();
             }
             CommandError::BufferOverflow => {
-                buf.push(0x12).unwrap();
+                buf.push(crate::control_protocol::ERROR_EXTENDED).unwrap();
+                buf.extend_from_slice(crate::control_protocol::ERROR_BUFFER_OVERFLOW_DETAIL).unwrap();
             }
             CommandError::Message(msg) => {
-                buf.push(0xff).unwrap();
+                buf.push(crate::control_protocol::ERROR_EXTENDED).unwrap();
                 buf.extend_from_slice(msg.as_bytes()).unwrap();
             }
         }

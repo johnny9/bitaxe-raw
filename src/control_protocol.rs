@@ -1,4 +1,10 @@
 pub const MIN_REQUEST_FRAME_LEN: usize = 6;
+pub const ERROR_TIMEOUT: u8 = 0x10;
+pub const ERROR_INVALID: u8 = 0x11;
+pub const ERROR_DENIED: u8 = 0x12;
+pub const ERROR_FAULT: u8 = 0x13;
+pub const ERROR_EXTENDED: u8 = 0xff;
+pub const ERROR_BUFFER_OVERFLOW_DETAIL: &[u8] = b"Buf";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FrameError {
@@ -55,5 +61,14 @@ mod tests {
         assert_eq!(response_frame_length(1), Some(4));
         assert_eq!(response_frame_length(256), Some(259));
         assert_eq!(response_frame_length(usize::MAX), None);
+    }
+
+    #[test]
+    fn error_codes_match_bitaxe_raw_esp() {
+        assert_eq!(ERROR_TIMEOUT, 0x10);
+        assert_eq!(ERROR_INVALID, 0x11);
+        assert_eq!(ERROR_DENIED, 0x12);
+        assert_eq!(ERROR_FAULT, 0x13);
+        assert_eq!([&[ERROR_EXTENDED][..], ERROR_BUFFER_OVERFLOW_DETAIL].concat(), b"\xffBuf");
     }
 }
