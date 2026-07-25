@@ -23,6 +23,7 @@ use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use static_cell::StaticCell;
 
 mod control;
+mod control_protocol;
 mod pio_uart;
 mod uart;
 
