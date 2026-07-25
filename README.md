@@ -1,8 +1,8 @@
-# bitaxe-raw usbserial firmware
+# bitaxe BIRDS raw USB firmware
 
-bitaxe-raw is usbserial passthrough firmware for talking directly to ASICs and board peripherals over USB. This `pico` version supports the RP2040 (like in the RPi Pico dev board). The asic UART has been moved to PIO1 to support 9bit serial frames for the Intel BZM2 ASIC.
+This firmware makes a BIRDS development board present the same host-facing USB identity and raw protocol as a BitaxeBonanza, without an ESP32 or an intermediate Bridge control UART. It runs directly on the original RP2040 Raspberry Pi Pico and targets `thumbv6m-none-eabi`; it does not target the RP2350.
 
-This branch is targeting the [bitaxeBIRDS](https://github.com/bitaxeorg/bitaxebirds) BZM2 dev board.
+The target hardware is the [`pico` branch of bitaxeBIRDS](https://github.com/bitaxeorg/bitaxeBIRDS/tree/pico). ASIC 9-bit UART is implemented on RP2040 PIO1.
 
 ## Developing
 
@@ -49,6 +49,8 @@ elf2uf2-rs -d target/thumbv6m-none-eabi/release/firmware
 
 ## Running
 The usbserial firmware will create two serial ports. The first serial port is "control serial" for I2C, GPIO, and ADC. The second serial port is "data serial" and is pass through UART.
+
+The composite USB device uses VID/PID `c0de:cafe`, manufacturer `OSMU`, and product `BitaxeBonanza`.
 
 ### Data Serial
 - Second serial port
@@ -121,10 +123,12 @@ Example:
 
 Commands:
 
-- pwr_en: 0x00
+- `RST_N` compatibility alias: 0x00
 - 5v_en: 0x01
 - asic_rst: 0x02
 - asic_trip (read-only): 0x03
+- VR_EN: 0x04
+- VR_PGOOD (read-only): 0x05
 
 Data:
 
@@ -132,10 +136,14 @@ Data:
 
 Example:
 
-- Set pwr_en High: `07 00 00 00 06 00 01`
+- Set `RST_N` High: `07 00 00 00 06 00 01`
 - Set 5v_en High: `07 00 00 00 06 01 01`
 - Get asic_rst: `06 00 00 00 06 02`
 - Get asic_trip: `06 00 00 00 06 03`
+- Set VR_EN High: `07 00 00 00 06 04 01`
+- Get VR_PGOOD: `06 00 00 00 06 05`
+
+GPIO and fan commands operate directly on the RP2040 pins. There is no safety-lease protocol on this developer firmware; the host owns power and reset sequencing.
 
 **ADC**
 

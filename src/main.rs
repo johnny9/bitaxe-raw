@@ -42,8 +42,8 @@ bind_interrupts!(struct Irqs {
 const FLASH_SIZE: usize = 4 * 1024 * 1024;
 const VERSION: u16 = 0x0001;
 
-static MANUFACTURER: &str = "256F";
-static PRODUCT: &str = "EmberOne00";
+static MANUFACTURER: &str = "OSMU";
+static PRODUCT: &str = "BitaxeBonanza";
 
 /// Return a unique serial number for this device by hashing its flash JEDEC ID.
 fn serial_number() -> &'static str {
@@ -110,9 +110,10 @@ async fn main(spawner: Spawner) {
     };
 
     let gpio_pins = control::gpio::Pins {
-        pwr_en: gpio::Output::new(p.PIN_19, gpio::Level::Low),
+        vr_en: gpio::Output::new(p.PIN_19, gpio::Level::Low),
+        vr_pgood: gpio::Input::new(p.PIN_16, gpio::Pull::None),
         v5_en: gpio::Output::new(p.PIN_18, gpio::Level::Low),
-        asic_rst: gpio::Output::new(p.PIN_11, gpio::Level::High),
+        asic_rst: gpio::Output::new(p.PIN_11, gpio::Level::Low),
         asic_trip: gpio::Input::new(p.PIN_10, gpio::Pull::None),
     };
 
@@ -133,9 +134,9 @@ async fn main(spawner: Spawner) {
         pwm_config.invert_a = false;
         pwm_config.phase_correct = false;
         pwm_config.enable = true; // Explicitly enable PWM
-        
+
         let pwm = pwm::Pwm::new_output_a(p.PWM_SLICE2, p.PIN_20, pwm_config.clone());
-        
+
         let tach = gpio::Input::new(p.PIN_21, gpio::Pull::None);
         control::fan::Pins { pwm, tach }
     };
