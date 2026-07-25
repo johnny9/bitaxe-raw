@@ -44,7 +44,7 @@ bind_interrupts!(struct Irqs {
 const FLASH_SIZE: usize = 2 * 1024 * 1024;
 const VERSION: u16 = 0x0001;
 
-static MANUFACTURER: &str = "OSMU";
+static MANUFACTURER: &str = "bitaxeBIRDS";
 static PRODUCT: &str = "BitaxeBonanza";
 
 /// Return a unique serial number for this device from its SPI flash unique ID.

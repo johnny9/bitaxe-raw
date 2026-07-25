@@ -50,7 +50,7 @@ elf2uf2-rs -d target/thumbv6m-none-eabi/release/bitaxe-birds-raw
 ## Running
 The usbserial firmware will create two serial ports. The first serial port is "control serial" for I2C, GPIO, and ADC. The second serial port is "data serial" and is pass through UART.
 
-The composite USB device uses VID/PID `c0de:cafe`, manufacturer `OSMU`, product `BitaxeBonanza`, and a 16-character serial derived from the RP2040 Pico's SPI flash unique ID.
+The composite USB device uses VID/PID `c0de:cafe`, manufacturer `bitaxeBIRDS`, product `BitaxeBonanza`, and a 16-character serial derived from the RP2040 Pico's SPI flash unique ID. Keeping the Bonanza product string preserves client compatibility, while the BIRDS manufacturer distinguishes this RP2040-only hardware in USB descriptors and persistent device paths.
 
 | Function | RP2040 GPIO |
 |----------|-------------|
