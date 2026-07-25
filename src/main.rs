@@ -43,8 +43,10 @@ bind_interrupts!(struct Irqs {
 
 const FLASH_SIZE: usize = 2 * 1024 * 1024;
 const VERSION: u16 = 0x0001;
+const USB_VID: u16 = 0xc0de;
+const USB_PID: u16 = 0xb17d;
 
-static MANUFACTURER: &str = "bitaxeBIRDS";
+static MANUFACTURER: &str = "OSMU";
 static PRODUCT: &str = "BitaxeBonanza";
 
 /// Return a unique serial number for this device from its SPI flash unique ID.
@@ -72,7 +74,7 @@ async fn main(spawner: Spawner) {
     let usb_driver = usb::Driver::new(p.USB, Irqs);
 
     let usb_config = {
-        let mut config = embassy_usb::Config::new(0xc0de, 0xcafe);
+        let mut config = embassy_usb::Config::new(USB_VID, USB_PID);
         config.device_release = VERSION;
         config.manufacturer = Some(MANUFACTURER);
         config.product = Some(PRODUCT);
