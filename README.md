@@ -1,6 +1,8 @@
-# bitaxe BIRDS raw USB firmware
+# bitaxe BIRDS combined raw/Bridge firmware
 
-This firmware makes a BIRDS development board present the same host-facing USB identity and raw protocol as a BitaxeBonanza, without an ESP32 or an intermediate Bridge control UART. It runs directly on the original RP2040 Raspberry Pi Pico and targets `thumbv6m-none-eabi`; it does not target the RP2350.
+This firmware makes the BIRDS reference device present the same host-facing product strings and raw protocol as `bitaxe-raw-bonanza` plus a protocol-1.0 `bonanza-bridge-fw`, while retaining its dedicated BIRDS USB PID. Both roles run in one image on the original RP2040 Raspberry Pi Pico; there is no ESP32 or internal ESP-to-Bridge UART. It targets `thumbv6m-none-eabi` and does not target the RP2350.
+
+The combined image pins its embedded Bridge policy and protocol helpers to `bonanza-bridge-fw` revision `478160d` (release `0.0.1-beta.2`). That version includes trip-latched output safety, a two-second internally owned lease, DMA-buffered ASIC RX, real overflow counters, and controlled fan speed while powered.
 
 The target hardware is the [`pico` branch of bitaxeBIRDS](https://github.com/bitaxeorg/bitaxeBIRDS/tree/pico). ASIC 9-bit UART is implemented on RP2040 PIO1.
 
@@ -48,7 +50,12 @@ elf2uf2-rs -d target/thumbv6m-none-eabi/release/bitaxe-birds-raw
 ```
 
 ## Running
-The usbserial firmware will create two serial ports. The first serial port is "control serial" for I2C, GPIO, and ADC. The second serial port is "data serial" and is pass through UART.
+The firmware creates the same two serial ports as `bitaxe-raw-bonanza`:
+
+- `control serial`: I2C, GPIO, ADC, fan, and read-only Bridge diagnostics
+- `data serial`: BIRDS-compatible ASIC traffic
+
+I2C, ADC, and VR control remain local raw-firmware functions. A dedicated always-running Bridge task owns 5 V, ASIC reset, trip monitoring, fan control, ASIC RX gating, the safety lease, and the hardware watchdog.
 
 The composite USB device uses VID/PID `c0de:b17d`, manufacturer `OSMU`, product `BitaxeBonanza`, and a 16-character serial derived from the RP2040 Pico's SPI flash unique ID. The distinct BIRDS product ID differentiates this RP2040-only hardware while preserving the Bonanza manufacturer and product strings used by clients.
 
@@ -66,7 +73,8 @@ The composite USB device uses VID/PID `c0de:b17d`, manufacturer `OSMU`, product 
 - Second serial port
 - **9-bit serial (9N1)**: 9 data bits, no parity, 1 stop bit
 - All data is passed through bidirectionally
-- USB serial baudrate is mirrored to the 9-bit UART output. Baudrates up to 5Mbaud have been tested, and seem to work 🤞
+- The ASIC UART is fixed at 5 Mbaud, matching the current Bonanza Bridge. USB CDC line-coding changes are ignored.
+- ASIC RX is drained continuously by DMA into a 1024-word ring while 5 V is enabled and reset is released. Safe transitions synchronously stop and reset the receive path so data from separate powered sessions cannot mix.
 
 **9-bit Data Encoding over USB:**
 
@@ -153,11 +161,11 @@ Example:
 - Set VR_EN High: `07 00 00 00 06 04 01`
 - Get VR_PGOOD: `06 00 00 00 06 05`
 
-GPIO and fan commands operate directly on the RP2040 pins. There is no safety-lease protocol on this developer firmware; the host owns power and reset sequencing.
+GPIO and fan commands use the embedded Bonanza Bridge safety policy. The combined firmware transparently arms and renews the local lease, so existing raw clients do not send lease commands. The policy requires full fan and asserted ASIC reset before enabling 5 V, and requires 5 V before releasing reset. Once controlled and powered, the latest Bridge policy permits a lower host-supervised fan target. Disabling 5 V, closing the control port, lease expiry, an ASIC trip, or a stalled Bridge task restores reset asserted, 5 V off, and full fan.
 
 This intentionally follows the Bonanza GPIO numbering: command `0x00` is the `RST_N` compatibility alias and VR enable is command `0x04`. Clients written for the older BIRDS raw mapping, where `0x00` meant VR enable, must use `0x04`.
 
-Closing the control serial port immediately asserts ASIC reset, disables 5 V and VR power, and drives the fan to full speed. This requires no lease acquisition, renewal, or keepalive command.
+VR enable remains a raw-side BIRDS reference-device GPIO, matching the ESP-side responsibility in a two-chip BitaxeBonanza. Closing the control serial port also disables VR power.
 
 **System diagnostics**
 
@@ -167,7 +175,7 @@ The read-only ESP-compatible diagnostic commands are available on page `0x00`:
 - receive overflow counters: `0x02`
 - safety status: `0x10`
 
-The payload schemas and error encodings match `bitaxe-raw-bonanza`. The direct RP2040 firmware reports protocol `1.0`, zero intermediate-UART/software-ring overflow counters, and its real GPIO, trip, and fan state. Its safety stage is `BootSafe` because this trusted-developer firmware deliberately has no lease. Lease mutation commands remain unavailable to host clients, matching the ESP raw interface.
+The payload schemas and error encodings match `bitaxe-raw-bonanza`. `GET_INFO` reports Bridge protocol `1.0` and the pinned Bridge firmware identity. RX statistics report the real PIO FIFO and DMA software-ring loss counters. Safety status reports the production `TripLatch` stage, live lease time, fault state, effective outputs, trip input, and capability value `0x008f`, including controlled fan speed. Lease mutation commands remain unavailable to USB clients, matching the ESP raw interface.
 
 Errors use the ESP diagnostic namespace: timeout `0x10`, invalid command `0x11`, denied `0x12`, fault `0x13`, and extended errors beginning with `0xff`. Buffer overflow is encoded as `ff 42 75 66` (`ff "Buf"`).
 
