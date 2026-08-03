@@ -31,6 +31,7 @@ struct Command {
 }
 
 #[derive(defmt::Format)]
+#[allow(clippy::large_enum_variant)]
 enum CommandInner {
     System(system::Command),
     I2c(i2c::Command),
@@ -91,6 +92,14 @@ pub enum CommandError {
 }
 
 impl CommandError {
+    pub fn from_bridge(error: crate::bridge::CommandError) -> Self {
+        match error {
+            crate::bridge::CommandError::Invalid => Self::Invalid,
+            crate::bridge::CommandError::Denied => Self::Denied,
+            crate::bridge::CommandError::Fault => Self::Fault,
+        }
+    }
+
     fn to_bytes(&self) -> Vec<u8, 260> {
         let mut buf = Vec::<u8, 260>::new();
         buf.extend_from_slice(&[0x00, 0x00, 0xff]).unwrap();
@@ -131,7 +140,6 @@ pub struct Controller {
     i2c: super::I2cDriver,
     gpio: gpio::Pins<'static>,
     adc: adc::Pins<'static>,
-    fan: fan::Pins<'static>,
 }
 
 pub trait ControllerCommand {
@@ -175,18 +183,16 @@ impl Controller {
         }
     }
 
-    fn fail_safe(&mut self) {
-        self.gpio.asic_rst.set_low();
-        self.gpio.v5_en.set_low();
+    async fn fail_safe(&mut self) {
         self.gpio.vr_en.set_low();
-        fan::set_speed(&mut self.fan, 100);
+        crate::bridge::shutdown().await;
     }
 }
 
 #[embassy_executor::task]
-pub async fn usb_task(class: CdcAcmClass<'static, super::UsbDriver>, i2c: super::I2cDriver, gpio: gpio::Pins<'static>, adc: adc::Pins<'static>, fan: fan::Pins<'static>) -> ! {
+pub async fn usb_task(class: CdcAcmClass<'static, super::UsbDriver>, i2c: super::I2cDriver, gpio: gpio::Pins<'static>, adc: adc::Pins<'static>) -> ! {
     let (tx, mut rx, mut ctrl) = class.split_with_control();
-    let mut controller = Controller { tx, i2c, gpio, adc, fan };
+    let mut controller = Controller { tx, i2c, gpio, adc };
 
     loop {
         rx.wait_connection().await;
@@ -195,7 +201,7 @@ pub async fn usb_task(class: CdcAcmClass<'static, super::UsbDriver>, i2c: super:
         }
         info!("Control: Connected");
         let _ = select(pipe_usb_read(&mut rx, &mut ctrl), controller.run()).await;
-        controller.fail_safe();
+        controller.fail_safe().await;
         while COMMAND_CHANNEL.try_receive().is_ok() {}
         info!("Control: Disconnected");
     }

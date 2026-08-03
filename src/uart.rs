@@ -1,99 +1,76 @@
-pub enum UartTaskError {
-    Disconnected,
-}
-
-use embassy_futures::select::{select3, Either3};
-use embassy_rp::usb::{self};
+use bonanza_bridge_fw::uart_codec::NineBitPairDecoder;
+use embassy_futures::select::{select, Either};
+use embassy_rp::{
+    peripherals::{DMA_CH0, PIO1},
+    usb,
+};
 use embassy_usb::{
     class::cdc_acm::{CdcAcmClass, ControlChanged, Receiver, Sender},
     driver::EndpointError,
 };
 
-use crate::pio_uart::PioUart;
-use crate::uart_codec::{response_byte, NineBitPairDecoder};
+use crate::pio_uart::{receive_buffered_rx_chunk, PioUart, PioUartRx, PioUartTx};
+
+pub enum UartTaskError {
+    Disconnected,
+}
 
 impl From<EndpointError> for UartTaskError {
-    fn from(val: EndpointError) -> Self {
-        match val {
-            EndpointError::BufferOverflow => panic!("Buffer overflow"),
-            EndpointError::Disabled => UartTaskError::Disconnected {},
+    fn from(error: EndpointError) -> Self {
+        match error {
+            EndpointError::BufferOverflow => panic!("buffer overflow"),
+            EndpointError::Disabled => Self::Disconnected,
         }
     }
 }
 
 #[embassy_executor::task]
-pub async fn usb_task(class: CdcAcmClass<'static, super::UsbDriver>, mut uart: PioUart<'static, embassy_rp::peripherals::PIO1, 0, 1>) -> ! {
-    let (mut tx, mut rx, mut ctrl) = class.split_with_control();
+pub async fn usb_task(class: CdcAcmClass<'static, super::UsbDriver>, uart: PioUart<'static, PIO1, 0, 1>, dma: DMA_CH0) -> ! {
+    let (mut usb_tx, mut usb_rx, mut ctrl) = class.split_with_control();
+    let (mut uart_tx, mut uart_rx) = uart.split();
+
+    // The state machine and channel are driven through PAC registers because
+    // Embassy's finite DMA future does not expose RP2040 address-ring mode.
+    // Keep both ownership guards for the lifetime of this task.
+    let _dma = dma;
 
     loop {
-        rx.wait_connection().await;
-        let _ = pipe_uart(&mut tx, &mut rx, &mut ctrl, &mut uart).await;
+        usb_rx.wait_connection().await;
+        let _ = select(host_to_asic(&mut usb_rx, &mut ctrl, &mut uart_tx), asic_to_host(&mut usb_tx, &mut uart_rx)).await;
     }
 }
 
-/// Handle ASIC UART <-> BMC USB TTY forwarding and baudrate changes.
-///
-/// Host-to-ASIC 9-bit serial data is encoded as pairs of bytes over USB:
-/// - First byte: lower 8 bits of the 9-bit word
-/// - Second byte: bit 8 (0 or 1)
-///
-/// ASIC responses return only their low eight bits, matching the BIRDS and
-/// latest Bonanza Bridge host contract.
-pub async fn pipe_uart<'d, T: usb::Instance + 'd>(
-    usb_tx: &mut Sender<'d, usb::Driver<'d, T>>,
-    usb_rx: &mut Receiver<'d, usb::Driver<'d, T>>,
-    ctrl: &mut ControlChanged<'d>,
-    uart: &mut PioUart<'static, embassy_rp::peripherals::PIO1, 0, 1>,
-) -> Result<(), UartTaskError> {
+/// Decode raw-protocol byte pairs from USB into fixed-rate 5 Mbaud 9N1 ASIC
+/// words. Unlike the original BIRDS firmware, USB line coding does not change
+/// the ASIC rate; this mirrors `bitaxe-raw-bonanza` plus protocol-1.0 Bridge.
+async fn host_to_asic<'d, T: usb::Instance + 'd>(usb_rx: &mut Receiver<'d, usb::Driver<'d, T>>, ctrl: &mut ControlChanged<'d>, uart_tx: &mut PioUartTx<'static, PIO1, 0>) -> Result<(), UartTaskError> {
     let mut usb_buf = [0u8; 64];
-    let mut uart_buf = [0u8; 64];
-    let mut uart_words = [0u16; 32];
+    let mut words = [0u16; 32];
     let mut decoder = NineBitPairDecoder::new();
 
-    let baudrate = usb_rx.line_coding().data_rate();
-    if baudrate != 0 {
-        uart.set_baudrate(baudrate);
+    loop {
+        match select(usb_rx.read_packet(&mut usb_buf), ctrl.control_changed()).await {
+            Either::First(result) => {
+                let count = result?;
+                let word_count = decoder.decode(&usb_buf[..count], &mut words);
+                for word in &words[..word_count] {
+                    uart_tx.write_u16(*word).await;
+                }
+            }
+            Either::Second(()) if !usb_rx.dtr() => return Err(UartTaskError::Disconnected),
+            Either::Second(()) => {}
+        }
     }
+}
+
+/// Forward DMA-buffered BIRDS-compatible ASIC response bytes to USB. The PIO
+/// receiver still samples the complete 9N1 word and requires its stop bit;
+/// protocol 1.0 forwards only the low eight response bits.
+async fn asic_to_host<'d, T: usb::Instance + 'd>(usb_tx: &mut Sender<'d, usb::Driver<'d, T>>, _uart_rx: &mut PioUartRx<'static, PIO1, 1>) -> Result<(), UartTaskError> {
+    let mut bytes = [0u8; 64];
 
     loop {
-        let usb_read = usb_rx.read_packet(&mut usb_buf);
-        let control_change = ctrl.control_changed();
-        let uart_read = uart.read_u16();
-
-        match select3(usb_read, control_change, uart_read).await {
-            // Forward data from USB host to UART as 9-bit words
-            // Expects pairs of bytes: [data_low, bit8, data_low, bit8, ...]
-            Either3::First(result) => {
-                let n = result?;
-                let word_count = decoder.decode(&usb_buf[..n], &mut uart_words);
-                for word in &uart_words[..word_count] {
-                    uart.write_u16(*word).await;
-                }
-            }
-            // Handle baudrate changes from USB CDC control requests
-            Either3::Second(()) => {
-                let line_coding = usb_rx.line_coding();
-                let baudrate = line_coding.data_rate();
-                uart.set_baudrate(baudrate);
-            }
-            // Forward BIRDS-compatible raw ASIC response bytes to USB.
-            Either3::Third(word) => {
-                let mut count = 0;
-
-                uart_buf[count] = response_byte(word);
-                count += 1;
-
-                while count < uart_buf.len() {
-                    if let Some(word) = uart.try_read() {
-                        uart_buf[count] = response_byte(word);
-                        count += 1;
-                    } else {
-                        break;
-                    }
-                }
-
-                usb_tx.write_packet(&uart_buf[..count]).await?;
-            }
-        }
+        let count = receive_buffered_rx_chunk(&mut bytes).await;
+        usb_tx.write_packet(&bytes[..count]).await?;
     }
 }

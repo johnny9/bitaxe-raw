@@ -4,9 +4,6 @@ use heapless::Vec;
 pub struct Pins<'d> {
     pub vr_en: embassy_rp::gpio::Output<'d>,
     pub vr_pgood: embassy_rp::gpio::Input<'d>,
-    pub v5_en: embassy_rp::gpio::Output<'d>,
-    pub asic_rst: embassy_rp::gpio::Output<'d>,
-    pub asic_trip: embassy_rp::gpio::Input<'d>,
 }
 
 #[derive(defmt::Format)]
@@ -44,17 +41,11 @@ impl Command {
 impl super::ControllerCommand for Command {
     async fn handle(&self, controller: &mut super::Controller) -> Result<Vec<u8, 256>, CommandError> {
         let level = match self {
-            Command::GetAsicResetn | Command::GetAsicRst => bool::from(controller.gpio.asic_rst.get_output_level()),
-            Command::SetAsicResetn { level } | Command::SetAsicRst { level } => {
-                controller.gpio.asic_rst.set_level((*level).into());
-                bool::from(controller.gpio.asic_rst.get_output_level())
-            }
-            Command::Get5vEn => bool::from(controller.gpio.v5_en.get_output_level()),
-            Command::Set5vEn { level } => {
-                controller.gpio.v5_en.set_level((*level).into());
-                bool::from(controller.gpio.v5_en.get_output_level())
-            }
-            Command::GetAsicTrip => controller.gpio.asic_trip.is_high(),
+            Command::GetAsicResetn | Command::GetAsicRst => return crate::bridge::gpio(crate::bridge::GPIO_ASIC_RESET, None).await.map_err(CommandError::from_bridge),
+            Command::SetAsicResetn { level } | Command::SetAsicRst { level } => return crate::bridge::gpio(crate::bridge::GPIO_ASIC_RESET, Some(*level)).await.map_err(CommandError::from_bridge),
+            Command::Get5vEn => return crate::bridge::gpio(crate::bridge::GPIO_5V_ENABLE, None).await.map_err(CommandError::from_bridge),
+            Command::Set5vEn { level } => return crate::bridge::gpio(crate::bridge::GPIO_5V_ENABLE, Some(*level)).await.map_err(CommandError::from_bridge),
+            Command::GetAsicTrip => return crate::bridge::gpio(crate::bridge::GPIO_ASIC_TRIP, None).await.map_err(CommandError::from_bridge),
             Command::GetVrEn => bool::from(controller.gpio.vr_en.get_output_level()),
             Command::SetVrEn { level } => {
                 controller.gpio.vr_en.set_level((*level).into());

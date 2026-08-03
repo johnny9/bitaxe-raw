@@ -84,6 +84,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "349f9b6a179ed607305526ca489b34ad0a41aed5f7980fa90eb03160b69598fb"
 
 [[package]]
+name = "bitaxe-birds-raw"
+version = "0.0.1"
+dependencies = [
+ "bonanza-bridge-fw",
+ "cortex-m",
+ "cortex-m-rt",
+ "defmt",
+ "defmt-rtt",
+ "embassy-embedded-hal",
+ "embassy-executor",
+ "embassy-futures",
+ "embassy-rp",
+ "embassy-sync",
+ "embassy-time",
+ "embassy-usb",
+ "embedded-io-async",
+ "fixed",
+ "heapless",
+ "hex",
+ "panic-probe",
+ "pio",
+ "pio-proc",
+ "portable-atomic",
+ "serde",
+ "smart-leds",
+ "static_cell",
+]
+
+[[package]]
 name = "bitfield"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -106,6 +135,32 @@ name = "bitflags"
 version = "2.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b048fb63fd8b5923fc5aa7b340d8e156aec7ec02f0c78fa8a6ddc2613f6f71de"
+
+[[package]]
+name = "bonanza-bridge-fw"
+version = "0.0.1"
+source = "git+https://github.com/johnny9/bonanza-bridge-fw?rev=478160de7a6b2159a748ea0189796999aa2e802d#478160de7a6b2159a748ea0189796999aa2e802d"
+dependencies = [
+ "cortex-m",
+ "cortex-m-rt",
+ "defmt",
+ "defmt-rtt",
+ "embassy-executor",
+ "embassy-futures",
+ "embassy-rp",
+ "embassy-sync",
+ "embassy-time",
+ "embedded-io-async",
+ "fixed",
+ "heapless",
+ "panic-probe",
+ "pio",
+ "pio-proc",
+ "portable-atomic",
+ "serde",
+ "smart-leds",
+ "static_cell",
+]
 
 [[package]]
 name = "bytemuck"
@@ -581,34 +636,6 @@ name = "equivalent"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5443807d6dff69373d433ab9ef5378ad8df50ca6298caf15de6e52e24aaf54d5"
-
-[[package]]
-name = "bitaxe-birds-raw"
-version = "0.0.1"
-dependencies = [
- "cortex-m",
- "cortex-m-rt",
- "defmt",
- "defmt-rtt",
- "embassy-embedded-hal",
- "embassy-executor",
- "embassy-futures",
- "embassy-rp",
- "embassy-sync",
- "embassy-time",
- "embassy-usb",
- "embedded-io-async",
- "fixed",
- "heapless",
- "hex",
- "panic-probe",
- "pio",
- "pio-proc",
- "portable-atomic",
- "serde",
- "smart-leds",
- "static_cell",
-]
 
 [[package]]
 name = "fixed"

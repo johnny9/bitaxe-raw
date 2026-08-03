@@ -5,6 +5,9 @@ edition = "2021"
 license = "MIT"
 
 [dependencies]
+bonanza-bridge-fw = { git = "https://github.com/johnny9/bonanza-bridge-fw", rev = "478160de7a6b2159a748ea0189796999aa2e802d" }
+
+[target.'cfg(all(target_arch = "arm", target_os = "none"))'.dependencies]
 cortex-m = "0.7.7"
 cortex-m-rt = "0.7.5"
 defmt = "0.3.8"

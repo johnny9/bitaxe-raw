@@ -6,3 +6,4 @@ target = "thumbv6m-none-eabi"
 
 [env]
 DEFMT_LOG = "debug"
+BONANZA_BRIDGE_FW_VERSION = "0.0.1-beta.2"

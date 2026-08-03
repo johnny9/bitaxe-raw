@@ -6,28 +6,32 @@ use defmt_rtt as _;
 use panic_probe as _;
 
 use embassy_executor::Spawner;
+use embassy_rp::interrupt::{InterruptExt, Priority};
 use embassy_rp::{
     adc::{self},
     bind_interrupts,
     flash::{self},
     gpio::{self},
     i2c::{self},
+    interrupt,
     peripherals::{PIO1, USB},
     pio::{self},
     pwm::{self},
     usb::{self},
     Peripheral,
 };
-use embassy_time::Timer;
+use embassy_time::Duration;
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use static_cell::StaticCell;
 
+use bonanza_bridge_fw::safety_timing::WATCHDOG_TIMEOUT_MS;
+
+mod bridge;
+mod bridge_owner;
 mod control;
 mod control_protocol;
-mod diagnostics;
 mod pio_uart;
 mod uart;
-mod uart_codec;
 
 pub type I2cPeripheral = embassy_rp::peripherals::I2C1;
 pub type I2cDriver = i2c::I2c<'static, I2cPeripheral, i2c::Async>;
@@ -54,7 +58,8 @@ static PRODUCT: &str = "BitaxeBonanza";
 fn serial_number() -> &'static str {
     let p = unsafe { embassy_rp::Peripherals::steal() };
     let flash = unsafe { p.FLASH.clone_unchecked() };
-    let mut flash = flash::Flash::<_, flash::Async, FLASH_SIZE>::new(flash, p.DMA_CH0);
+    // DMA channel 0 is reserved for the continuously draining ASIC RX ring.
+    let mut flash = flash::Flash::<_, flash::Async, FLASH_SIZE>::new(flash, p.DMA_CH1);
     let mut unique_id = [0; 8];
     flash.blocking_unique_id(&mut unique_id).unwrap();
 
@@ -68,9 +73,16 @@ fn serial_number() -> &'static str {
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
 
+    // ASIC RX uses DMA, but PIO remains highest priority for command TX. USB
+    // comes next, followed by slower board-peripheral work.
+    interrupt::PIO1_IRQ_0.set_priority(Priority::P0);
+    interrupt::USBCTRL_IRQ.set_priority(Priority::P1);
+    interrupt::I2C1_IRQ.set_priority(Priority::P2);
+    interrupt::ADC_IRQ_FIFO.set_priority(Priority::P2);
+
     let mut watchdog = embassy_rp::watchdog::Watchdog::new(p.WATCHDOG);
     watchdog.set_scratch(0, 0);
-    watchdog.feed();
+    watchdog.start(Duration::from_millis(WATCHDOG_TIMEOUT_MS));
 
     let usb_driver = usb::Driver::new(p.USB, Irqs);
 
@@ -118,7 +130,11 @@ async fn main(spawner: Spawner) {
     let gpio_pins = control::gpio::Pins {
         vr_en: gpio::Output::new(p.PIN_19, gpio::Level::Low),
         vr_pgood: gpio::Input::new(p.PIN_16, gpio::Pull::None),
+    };
+
+    let bridge_gpio_pins = bridge::Pins {
         v5_en: gpio::Output::new(p.PIN_18, gpio::Level::Low),
+        // ASIC_RST is RST_N, so LOW is the semantic asserted/safe level.
         asic_rst: gpio::Output::new(p.PIN_11, gpio::Level::Low),
         asic_trip: gpio::Input::new(p.PIN_10, gpio::Pull::None),
     };
@@ -132,32 +148,21 @@ async fn main(spawner: Spawner) {
     };
 
     let fan_pins = {
-        let mut pwm_config = pwm::Config::default();
-        pwm_config.top = 1000; // 1000 steps for 0.1% resolution
-        pwm_config.compare_a = 0; // Start at 0% duty cycle
-        pwm_config.compare_b = 0;
-        pwm_config.divider = 5.into(); // 125MHz / 5 / 1000 = 25kHz
-        pwm_config.invert_a = false;
-        pwm_config.phase_correct = false;
-        pwm_config.enable = true; // Explicitly enable PWM
-
+        let pwm_config = bridge::fan_pwm_config(100);
         let pwm = pwm::Pwm::new_output_a(p.PWM_SLICE2, p.PIN_20, pwm_config.clone());
-
         let tach = gpio::Input::new(p.PIN_21, gpio::Pull::None);
-        control::fan::Pins { pwm, tach, percent: 100 }
+        bridge::FanPins { pwm, tach }
     };
 
     let pio::Pio { mut common, sm0, sm1, .. } = pio::Pio::new(p.PIO1, Irqs);
-    let asic_uart = pio_uart::PioUart::new(&mut common, sm0, sm1, p.PIN_8, p.PIN_9, 115200);
+    let asic_uart = pio_uart::PioUart::new(&mut common, sm0, sm1, p.PIN_8, p.PIN_9, 5_000_000);
 
     unwrap!(spawner.spawn(usb_task(builder.build())));
-    unwrap!(spawner.spawn(control::usb_task(control_class, i2c, gpio_pins, adc_pins, fan_pins)));
-    unwrap!(spawner.spawn(uart::usb_task(asic_uart_class, asic_uart)));
+    unwrap!(spawner.spawn(bridge::manager_task(bridge_gpio_pins, fan_pins, watchdog)));
+    unwrap!(spawner.spawn(control::usb_task(control_class, i2c, gpio_pins, adc_pins)));
+    unwrap!(spawner.spawn(uart::usb_task(asic_uart_class, asic_uart, p.DMA_CH0)));
 
-    loop {
-        watchdog.feed();
-        Timer::after_secs(2).await;
-    }
+    core::future::pending::<()>().await;
 }
 
 #[embassy_executor::task]

@@ -1,6 +1,159 @@
-use embassy_rp::pio::{
-    Config, Direction, FifoJoin, Instance, PioPin, ShiftDirection, StateMachine,
+use core::{
+    cell::UnsafeCell,
+    sync::atomic::{compiler_fence, Ordering as CompilerOrdering},
 };
+
+use bonanza_bridge_fw::uart_codec::{asic_rx_word_to_u16, asic_rx_word_to_u8};
+use bonanza_bridge_fw::uart_timing::{clock_divider_bits, dma_ring_window, ASIC_RX_DMA_RING_WORDS, ASIC_RX_DMA_TRANSFER_COUNT};
+use embassy_rp::{
+    clocks::clk_sys_freq,
+    pac,
+    pio::{Config, Direction, FifoJoin, Instance, PioPin, ShiftDirection, StateMachine},
+};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
+use embassy_time::Timer;
+use portable_atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+
+const ASIC_RX_SM: usize = 1;
+const ASIC_RX_DMA_CHANNEL: usize = 0;
+const ASIC_RX_DMA_RING_BYTES_LOG2: u8 = 12;
+const ASIC_RX_POLL_INTERVAL_US: u64 = 250;
+
+#[repr(C, align(4096))]
+struct AlignedDmaRing(UnsafeCell<[u32; ASIC_RX_DMA_RING_WORDS]>);
+
+// DMA owns writes and the receive task uses volatile reads only after observing
+// TRANS_COUNT. Natural alignment is required by RP2040 address wrapping.
+unsafe impl Sync for AlignedDmaRing {}
+
+static ASIC_RX_DMA_RING: AlignedDmaRing = AlignedDmaRing(UnsafeCell::new([0; ASIC_RX_DMA_RING_WORDS]));
+static ASIC_RX_GATE_CHANGED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+static ASIC_RX_FIFO_OVERFLOWS: AtomicU32 = AtomicU32::new(0);
+static ASIC_RX_RING_OVERFLOWS: AtomicU32 = AtomicU32::new(0);
+static ASIC_RX_ENABLED: AtomicBool = AtomicBool::new(false);
+static ASIC_RX_PROGRAM_ORIGIN: AtomicU8 = AtomicU8::new(0);
+static ASIC_RX_DMA_CONSUMED: AtomicU32 = AtomicU32::new(0);
+static ASIC_RX_DMA_GENERATION: AtomicU32 = AtomicU32::new(0);
+
+fn abort_buffered_rx_dma() {
+    pac::DMA.chan_abort().modify(|mask| mask.set_chan_abort(1 << ASIC_RX_DMA_CHANNEL));
+    while pac::DMA.ch(ASIC_RX_DMA_CHANNEL).ctrl_trig().read().busy() {}
+}
+
+fn start_buffered_rx_dma() {
+    let channel = pac::DMA.ch(ASIC_RX_DMA_CHANNEL);
+    channel.read_addr().write_value(pac::PIO1.rxf(ASIC_RX_SM).as_ptr() as u32);
+    channel.write_addr().write_value(ASIC_RX_DMA_RING.0.get().cast::<u32>() as u32);
+    channel.trans_count().write(|count| *count = ASIC_RX_DMA_TRANSFER_COUNT);
+
+    compiler_fence(CompilerOrdering::SeqCst);
+    channel.ctrl_trig().write(|control| {
+        control.set_high_priority(true);
+        control.set_data_size(pac::dma::vals::DataSize::SIZE_WORD);
+        control.set_incr_read(false);
+        control.set_incr_write(true);
+        control.set_ring_size(ASIC_RX_DMA_RING_BYTES_LOG2);
+        control.set_ring_sel(true);
+        control.set_chain_to(ASIC_RX_DMA_CHANNEL as u8);
+        control.set_treq_sel(pac::dma::vals::TreqSel::PIO1_RX1);
+        control.set_en(true);
+    });
+    compiler_fence(CompilerOrdering::SeqCst);
+}
+
+/// Gate ASIC receive forwarding with the effective bridge safety outputs.
+///
+/// Disabling synchronously stops DMA, drains the PIO FIFO, and restores the
+/// receiver to its start-bit wait. Enabling arms DMA before the state machine,
+/// so bytes from separate powered sessions cannot be mixed.
+pub fn set_buffered_rx_forwarding_enabled(enabled: bool) {
+    let pio = &pac::PIO1;
+    let mask = 1u8 << ASIC_RX_SM;
+
+    ASIC_RX_ENABLED.store(false, Ordering::Release);
+    abort_buffered_rx_dma();
+    pio.ctrl().modify(|w| w.set_sm_enable(w.sm_enable() & !mask));
+    while pio.fstat().read().rxempty() & mask == 0 {
+        let _ = pio.rxf(ASIC_RX_SM).read();
+    }
+    let fdebug = pio.fdebug();
+    if fdebug.read().rxstall() & mask != 0 {
+        fdebug.write(|w| w.set_rxstall(mask));
+    }
+    ASIC_RX_FIFO_OVERFLOWS.store(0, Ordering::Relaxed);
+    ASIC_RX_RING_OVERFLOWS.store(0, Ordering::Relaxed);
+    ASIC_RX_DMA_CONSUMED.store(0, Ordering::Relaxed);
+    ASIC_RX_DMA_GENERATION.fetch_add(1, Ordering::AcqRel);
+
+    if enabled {
+        let origin = ASIC_RX_PROGRAM_ORIGIN.load(Ordering::Relaxed);
+        // An unconditional JMP encodes the five-bit program address. Executing
+        // it while disabled restores framing after a mid-byte safe transition.
+        pio.sm(ASIC_RX_SM).instr().write(|w| w.set_instr(origin as u16));
+        pio.ctrl().modify(|w| {
+            w.set_sm_restart(w.sm_restart() | mask);
+            w.set_clkdiv_restart(w.clkdiv_restart() | mask);
+        });
+        start_buffered_rx_dma();
+        ASIC_RX_ENABLED.store(true, Ordering::Release);
+        pio.ctrl().modify(|w| w.set_sm_enable(w.sm_enable() | mask));
+    }
+    ASIC_RX_GATE_CHANGED.signal(());
+}
+
+pub async fn receive_buffered_rx_chunk(output: &mut [u8]) -> usize {
+    assert!(!output.is_empty());
+    loop {
+        while !ASIC_RX_ENABLED.load(Ordering::Acquire) {
+            ASIC_RX_GATE_CHANGED.wait().await;
+        }
+
+        let channel = pac::DMA.ch(ASIC_RX_DMA_CHANNEL);
+        if !channel.ctrl_trig().read().busy() {
+            ASIC_RX_DMA_CONSUMED.store(0, Ordering::Relaxed);
+            ASIC_RX_DMA_GENERATION.fetch_add(1, Ordering::AcqRel);
+            start_buffered_rx_dma();
+            Timer::after_micros(ASIC_RX_POLL_INTERVAL_US).await;
+            continue;
+        }
+
+        let generation = ASIC_RX_DMA_GENERATION.load(Ordering::Acquire);
+        let remaining = channel.trans_count().read();
+        let produced = ASIC_RX_DMA_TRANSFER_COUNT.wrapping_sub(remaining);
+        let consumed = ASIC_RX_DMA_CONSUMED.load(Ordering::Relaxed);
+        let (consumed, available, dropped) = dma_ring_window(produced, consumed, ASIC_RX_DMA_RING_WORDS);
+        ASIC_RX_RING_OVERFLOWS.fetch_add(dropped, Ordering::Relaxed);
+
+        if available != 0 {
+            let count = available.min(output.len());
+            compiler_fence(CompilerOrdering::Acquire);
+            for (offset, byte) in output[..count].iter_mut().enumerate() {
+                let index = consumed.wrapping_add(offset as u32) as usize % ASIC_RX_DMA_RING_WORDS;
+                let raw = unsafe { core::ptr::read_volatile(ASIC_RX_DMA_RING.0.get().cast::<u32>().add(index)) };
+                *byte = asic_rx_word_to_u8(raw);
+            }
+
+            if generation == ASIC_RX_DMA_GENERATION.load(Ordering::Acquire) && ASIC_RX_ENABLED.load(Ordering::Acquire) {
+                ASIC_RX_DMA_CONSUMED.store(consumed.wrapping_add(count as u32), Ordering::Release);
+                return count;
+            }
+            continue;
+        }
+
+        Timer::after_micros(ASIC_RX_POLL_INTERVAL_US).await;
+    }
+}
+
+pub fn buffered_rx_overflows() -> (u32, u32) {
+    let pio = &pac::PIO1;
+    let mask = 1u8 << ASIC_RX_SM;
+    let fdebug = pio.fdebug();
+    if fdebug.read().rxstall() & mask != 0 {
+        fdebug.write(|w| w.set_rxstall(mask));
+        ASIC_RX_FIFO_OVERFLOWS.fetch_add(1, Ordering::Relaxed);
+    }
+    (ASIC_RX_FIFO_OVERFLOWS.load(Ordering::Relaxed), ASIC_RX_RING_OVERFLOWS.load(Ordering::Relaxed))
+}
 
 /// PIO-based 9N1 UART (9 data bits, no parity, 1 stop bit)
 pub struct PioUart<'d, PIO: Instance, const SM_TX: usize, const SM_RX: usize> {
@@ -8,15 +161,9 @@ pub struct PioUart<'d, PIO: Instance, const SM_TX: usize, const SM_RX: usize> {
     sm_rx: StateMachine<'d, PIO, SM_RX>,
 }
 
+#[allow(dead_code)]
 impl<'d, PIO: Instance, const SM_TX: usize, const SM_RX: usize> PioUart<'d, PIO, SM_TX, SM_RX> {
-    pub fn new(
-        pio: &mut embassy_rp::pio::Common<'d, PIO>,
-        mut sm_tx: StateMachine<'d, PIO, SM_TX>,
-        mut sm_rx: StateMachine<'d, PIO, SM_RX>,
-        tx_pin: impl PioPin,
-        rx_pin: impl PioPin,
-        baudrate: u32,
-    ) -> Self {
+    pub fn new(pio: &mut embassy_rp::pio::Common<'d, PIO>, mut sm_tx: StateMachine<'d, PIO, SM_TX>, mut sm_rx: StateMachine<'d, PIO, SM_RX>, tx_pin: impl PioPin, rx_pin: impl PioPin, baudrate: u32) -> Self {
         // PIO program for 9-bit UART TX
         // Sends 1 start bit, 9 data bits, 1 stop bit = 11 bits total
         // Each bit period is 8 cycles for correct baudrate timing
@@ -32,17 +179,18 @@ impl<'d, PIO: Instance, const SM_TX: usize, const SM_RX: usize> PioUart<'d, PIO,
             ".wrap"
         );
 
-        // PIO program for 9-bit UART RX
-        // Receives 1 start bit, 9 data bits, 1 stop bit
-        // Each bit period is 8 cycles
+        // Sample all nine data bits and require the actual stop/idle level
+        // before looking for another start bit. This is the protocol-1.0
+        // Bonanza receiver timing used at the fixed 5 Mbaud ASIC rate.
         let prg_rx = pio_proc::pio_asm!(
             ".wrap_target"
             "wait 0 pin 0",          // Wait for start bit (falling edge)
-            "set x, 8     [11]",     // Set bit counter to 8 (9 bits), delay 1.5 bit periods to center of first data bit
+            "set x, 8     [10]",     // Center the first sample 1.5 bit periods after start detection
             "bitloop:",
             "in pins, 1   [6]",      // Sample and shift in 1 bit (7 cycles)
             "jmp x-- bitloop",       // Loop (1 cycle) = 8 cycles per bit
-            ".wrap"                  // Remove manual push, use autopush instead
+            "wait 1 pin 0",          // Require the stop/idle level
+            ".wrap"                  // Autopush provides one complete word
         );
 
         // Install TX program
@@ -57,10 +205,10 @@ impl<'d, PIO: Instance, const SM_TX: usize, const SM_RX: usize> PioUart<'d, PIO,
         cfg_tx.shift_out.auto_fill = false;
         cfg_tx.shift_out.threshold = 32;
         cfg_tx.fifo_join = FifoJoin::TxOnly;
-        
+
         // Calculate clock divider for baudrate
         cfg_tx.clock_divider = Self::calculate_clk_div(baudrate);
-        
+
         sm_tx.set_config(&cfg_tx);
         sm_tx.set_enable(true);
 
@@ -73,35 +221,24 @@ impl<'d, PIO: Instance, const SM_TX: usize, const SM_RX: usize> PioUart<'d, PIO,
         let prg_rx_loaded = pio.load_program(&prg_rx.program);
         cfg_rx.use_program(&prg_rx_loaded, &[]);
         cfg_rx.set_in_pins(&[&rx_pin]);
-        cfg_rx.shift_in.direction = ShiftDirection::Right;  // Shift right (LSB first) like standard UART
-        cfg_rx.shift_in.auto_fill = true;   // Enable autopush
-        cfg_rx.shift_in.threshold = 9;      // Autopush after 9 bits
+        cfg_rx.shift_in.direction = ShiftDirection::Right; // Shift right (LSB first) like standard UART
+        cfg_rx.shift_in.auto_fill = true; // Enable autopush
+        cfg_rx.shift_in.threshold = 9; // Autopush after 9 bits
         cfg_rx.fifo_join = FifoJoin::RxOnly;
         cfg_rx.clock_divider = Self::calculate_clk_div(baudrate);
-        
+        ASIC_RX_PROGRAM_ORIGIN.store(prg_rx_loaded.origin, Ordering::Relaxed);
+
         sm_rx.set_config(&cfg_rx);
-        sm_rx.set_enable(true);
+        // Safety ownership enables the receiver only after 5 V is present and
+        // reset is released.
+        sm_rx.set_enable(false);
 
         Self { sm_tx, sm_rx }
     }
 
     fn calculate_clk_div(baudrate: u32) -> fixed::FixedU32<fixed::types::extra::U8> {
-        // RP2040 system clock is typically 125 MHz
-        // Each UART bit should take the same amount of time
-        // In our PIO program, each bit takes 8 cycles (1 instruction + 7 delay)
-        // clk_div = sys_clk / (baudrate * cycles_per_bit)
-        let sys_clk = 125_000_000u32;
-        let cycles_per_bit = 8u32;
-        
-        // Calculate using fixed-point arithmetic (8.8 format)
-        // clk_div = sys_clk / (baudrate * cycles_per_bit)
-        let divisor = baudrate * cycles_per_bit;
-        
-        // Convert to 8.8 fixed point format
-        // Multiply sys_clk by 256 to get fractional precision
-        let clk_div_u32 = ((sys_clk as u64 * 256) / divisor as u64) as u32;
-        
-        fixed::FixedU32::from_bits(clk_div_u32)
+        let bits = clock_divider_bits(clk_sys_freq(), baudrate).expect("PIO UART baudrate must produce a valid divider");
+        fixed::FixedU32::from_bits(bits)
     }
 
     pub fn set_baudrate(&mut self, baudrate: u32) {
@@ -121,7 +258,7 @@ impl<'d, PIO: Instance, const SM_TX: usize, const SM_RX: usize> PioUart<'d, PIO,
     #[allow(dead_code)]
     pub async fn read_u16(&mut self) -> u16 {
         let data = self.sm_rx.rx().wait_pull().await;
-        ((data >> 23) & 0x1FF) as u16
+        asic_rx_word_to_u16(data)
     }
 
     /// Check if TX FIFO is full
@@ -149,22 +286,13 @@ impl<'d, PIO: Instance, const SM_TX: usize, const SM_RX: usize> PioUart<'d, PIO,
 
     /// Try to read a 9-bit value (non-blocking)
     pub fn try_read(&mut self) -> Option<u16> {
-        if let Some(data) = self.sm_rx.rx().try_pull() {
-            // With autopush threshold=9 and shift_right, autopush happens after 9 bits
-            // The bits end up in the upper 9 bits [31:23] of the 32-bit word
-            Some(((data >> 23) & 0x1FF) as u16)
-        } else {
-            None
-        }
+        self.sm_rx.rx().try_pull().map(asic_rx_word_to_u16)
     }
 
     /// Split into separate TX and RX handles
     #[allow(dead_code)]
     pub fn split(self) -> (PioUartTx<'d, PIO, SM_TX>, PioUartRx<'d, PIO, SM_RX>) {
-        (
-            PioUartTx { sm: self.sm_tx },
-            PioUartRx { sm: self.sm_rx },
-        )
+        (PioUartTx { sm: self.sm_tx }, PioUartRx { sm: self.sm_rx })
     }
 }
 
@@ -206,11 +334,11 @@ pub struct PioUartRx<'d, PIO: Instance, const SM: usize> {
 impl<'d, PIO: Instance, const SM: usize> PioUartRx<'d, PIO, SM> {
     pub async fn read_u16(&mut self) -> u16 {
         let data = self.sm.rx().wait_pull().await;
-        ((data >> 23) & 0x1FF) as u16
+        asic_rx_word_to_u16(data)
     }
 
     pub fn try_read(&mut self) -> Option<u16> {
-        self.sm.rx().try_pull().map(|data| ((data >> 23) & 0x1FF) as u16)
+        self.sm.rx().try_pull().map(asic_rx_word_to_u16)
     }
 
     pub fn is_empty(&mut self) -> bool {
